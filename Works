@@ -1,0 +1,325 @@
+import sys
+import os
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout,
+    QToolBar, QAction, QLabel, QShortcut, QStackedWidget
+)
+from PyQt5.QtGui import QKeySequence
+from PyQt5.QtCore import QUrl, QTimer, Qt, QPropertyAnimation, QRect
+from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage, QWebEngineProfile
+from functools import partial
+
+class AutoTabSwitcher:
+    def __init__(self, stacked_widget, interval, pause_label, default_urls):
+        self.stacked_widget = stacked_widget
+        self.interval = interval
+        self.pause_label = pause_label
+        self.current_index = 0
+        self.total_tabs = stacked_widget.count()
+        self.is_paused = False
+        self.default_urls = default_urls
+        self.current_urls = list(default_urls)  # Track current URLs for each tab
+
+        # Timer for switching tabs
+        self.switch_timer = QTimer()
+        self.switch_timer.timeout.connect(self.switch_tab)
+
+        # Timer for refreshing tabs
+        self.refresh_timer = QTimer()
+        self.refresh_timer.timeout.connect(self.refresh_next_tab)
+
+        if interval > 0:
+            self.start_timers()
+        else:
+            self.is_paused = True
+            self.pause_label.show()
+
+    def start_timers(self):
+        self.is_paused = False
+        self.pause_label.hide()
+        self.schedule_refresh()
+        self.switch_timer.start(self.interval)
+
+    def stop_timers(self):
+        self.is_paused = True
+        self.pause_label.show()
+        self.switch_timer.stop()
+        self.refresh_timer.stop()
+
+    def toggle(self):
+        if self.is_paused:
+            self.start_timers()
+        else:
+            self.stop_timers()
+
+    def schedule_refresh(self):
+        # Calculate when to refresh: interval - 3000 milliseconds (3 seconds before switching)
+        refresh_interval = max(0, self.interval - 3000)
+        self.refresh_timer.start(refresh_interval)
+
+    def refresh_next_tab(self):
+        next_index = (self.current_index + 1) % self.total_tabs
+        widget = self.stacked_widget.widget(next_index)
+        if isinstance(widget, QWebEngineView):
+            self.save_ui_state(widget)
+            widget.reload()
+            widget.loadFinished.connect(lambda: self.restore_ui_state(widget))
+        # Stop the refresh timer until the next cycle
+        self.refresh_timer.stop()
+
+    def save_ui_state(self, web_view):
+        js_code = """
+        // Save the scroll position and any other necessary UI state
+        sessionStorage.setItem('scrollPosition', window.scrollY);
+        // Save other UI elements as needed
+        """
+        web_view.page().runJavaScript(js_code)
+
+    def restore_ui_state(self, web_view):
+        js_code = """
+        // Restore the scroll position and other UI state
+        var scrollPos = sessionStorage.getItem('scrollPosition');
+        if (scrollPos !== null) {
+            window.scrollTo(0, parseInt(scrollPos));
+        }
+        // Restore other UI elements as needed
+        """
+        web_view.page().runJavaScript(js_code)
+
+    def switch_tab(self):
+        # Perform wipe transition
+        direction = 1  # 1 for forward, -1 for backward
+        next_index = (self.current_index + 1) % self.total_tabs
+        wipe_transition(self.stacked_widget, self.current_index, next_index, direction)
+        self.current_index = next_index
+        # Schedule the next refresh
+        self.schedule_refresh()
+
+    def open_custom_link(self, index, url):
+        """Opens a custom link in the tab and pauses the switcher for 10 seconds."""
+        if 0 <= index < self.total_tabs:
+            # Open the custom URL in the specified tab
+            widget = self.stacked_widget.widget(index)
+            if isinstance(widget, QWebEngineView):
+                widget.setUrl(QUrl(url))
+                self.current_urls[index] = url  # Track the new current URL for the tab
+
+            # Pause auto-switching and refresh for 10 seconds
+            self.stop_timers()
+
+            # After 10 seconds, revert to default URL and resume auto-switching
+            QTimer.singleShot(10000, lambda: self.revert_to_default(index))
+
+    def revert_to_default(self, index):
+        """Reverts the tab back to its default URL and resumes auto-switching."""
+        if 0 <= index < self.total_tabs:
+            widget = self.stacked_widget.widget(index)
+            if isinstance(widget, QWebEngineView):
+                widget.setUrl(QUrl(self.default_urls[index]))
+                self.current_urls[index] = self.default_urls[index]  # Revert to default URL
+
+        # Resume auto-switching after reverting
+        self.start_timers()
+
+def open_fullscreen_browser_with_features(urls, interval=0):
+    app = QApplication(sys.argv)
+
+    # Create a persistent profile
+    profile = QWebEngineProfile('PersistentProfile', app)
+    profile.setPersistentCookiesPolicy(QWebEngineProfile.ForcePersistentCookies)
+    # Set the storage path for persistent data
+    storage_path = os.path.join(os.getcwd(), 'browser_data')
+    profile.setCachePath(storage_path)
+    profile.setPersistentStoragePath(storage_path)
+
+    # Main widget and layout
+    main_widget = QWidget()
+    main_layout = QVBoxLayout()
+    main_layout.setContentsMargins(0, 0, 0, 0)
+    main_widget.setLayout(main_layout)
+
+    # Create a stacked widget to hold web views
+    stacked_widget = QStackedWidget()
+    web_views = []
+    for index, url in enumerate(urls):
+        web = QWebEngineView()
+        # Ensure the web view accepts focus
+        web.setFocusPolicy(Qt.StrongFocus)
+        # Create a page with the persistent profile
+        page = QWebEnginePage(profile, web)
+        web.setPage(page)
+        web.setUrl(QUrl(url))
+        stacked_widget.addWidget(web)
+        web_views.append(web)
+
+    # Create a toolbar for navigation and refresh
+    toolbar = QToolBar()
+    refresh_action = QAction("Refresh", main_widget)
+    refresh_action.setShortcut("F5")
+    refresh_action.triggered.connect(lambda: refresh_tab(stacked_widget))
+    toolbar.addAction(refresh_action)
+
+    refresh_all_action = QAction("Refresh All", main_widget)
+    refresh_all_action.setShortcut("Ctrl+F5")
+    refresh_all_action.triggered.connect(lambda: refresh_all_tabs(stacked_widget))
+    toolbar.addAction(refresh_all_action)
+
+    # Add toolbar and stacked widget to the main layout
+    main_layout.addWidget(toolbar)
+    main_layout.addWidget(stacked_widget)
+
+    # Pause label at the bottom left
+    pause_label = QLabel("Paused")
+    pause_label.setAlignment(Qt.AlignLeft | Qt.AlignBottom)
+    pause_label.setStyleSheet("font-size: 18px; color: white; background-color: rgba(0, 0, 0, 0.5);")
+    pause_label.setMargin(10)
+    pause_label.hide()  # Initially hidden when auto-switching is active
+
+    # Create a layout to position the pause label at the bottom left
+    overlay_layout = QHBoxLayout()
+    overlay_layout.addWidget(pause_label)
+    overlay_layout.addStretch()
+    main_layout.addLayout(overlay_layout)
+
+    main_widget.showFullScreen()
+
+    # Initialize the AutoTabSwitcher with default URLs
+    auto_switcher = AutoTabSwitcher(stacked_widget, interval, pause_label, urls)
+    stacked_widget.auto_switcher = auto_switcher  # Store auto_switcher as an attribute
+
+    # Keyboard shortcuts for switching tabs and opening custom links
+    setup_keyboard_shortcuts(stacked_widget, auto_switcher, len(urls))
+
+    sys.exit(app.exec_())
+
+def setup_keyboard_shortcuts(stacked_widget, auto_switcher, num_tabs):
+    # Keyboard shortcuts for switching tabs
+    next_tab_shortcut = QShortcut(QKeySequence("Ctrl+Tab"), stacked_widget)
+    next_tab_shortcut.activated.connect(lambda: switch_tab(stacked_widget, 1))
+
+    prev_tab_shortcut = QShortcut(QKeySequence("Ctrl+Shift+Tab"), stacked_widget)
+    prev_tab_shortcut.activated.connect(lambda: switch_tab(stacked_widget, -1))
+
+    # Keyboard shortcut to pause/resume automatic tab switching
+    pause_shortcut = QShortcut(QKeySequence("Space"), stacked_widget)
+    pause_shortcut.activated.connect(auto_switcher.toggle)
+
+    # Keyboard shortcuts to switch to specific tabs
+    for i in range(num_tabs):
+        key_sequence = QKeySequence(f"Ctrl+{i+1}")
+        shortcut = QShortcut(key_sequence, stacked_widget)
+        shortcut.activated.connect(partial(switch_to_tab, stacked_widget, i))
+
+    # Add shortcuts to open custom links in tabs
+    QShortcut(QKeySequence("Ctrl+L"), stacked_widget).activated.connect(lambda: auto_switcher.open_custom_link(0, 'https://example.com'))
+    QShortcut(QKeySequence("Ctrl+M"), stacked_widget).activated.connect(lambda: auto_switcher.open_custom_link(1, 'https://anotherexample.com'))
+    QShortcut(QKeySequence("Ctrl+N"), stacked_widget).activated.connect(lambda: auto_switcher.open_custom_link(2, 'https://yetanotherexample.com'))
+
+def wipe_transition(stacked_widget, current_index, next_index, direction):
+    current_widget = stacked_widget.widget(current_index)
+    next_widget = stacked_widget.widget(next_index)
+
+    stacked_widget.setCurrentIndex(current_index)
+    stacked_widget.currentWidget().show()
+
+    width = stacked_widget.frameGeometry().width()
+    height = stacked_widget.frameGeometry().height()
+
+    # Position the next widget off-screen
+    if direction == 1:
+        start_pos = QRect(width, 0, width, height)
+        end_pos = QRect(0, 0, width, height)
+    else:
+        start_pos = QRect(-width, 0, width, height)
+        end_pos = QRect(0, 0, width, height)
+
+    next_widget.setGeometry(start_pos)
+    next_widget.show()
+
+    # Animate the current widget out
+    current_animation = QPropertyAnimation(current_widget, b'geometry')
+    current_animation.setDuration(500)
+    current_animation.setStartValue(QRect(0, 0, width, height))
+    if direction == 1:
+        current_animation.setEndValue(QRect(-width, 0, width, height))
+    else:
+        current_animation.setEndValue(QRect(width, 0, width, height))
+
+    # Animate the next widget in
+    next_animation = QPropertyAnimation(next_widget, b'geometry')
+    next_animation.setDuration(500)
+    next_animation.setStartValue(start_pos)
+    next_animation.setEndValue(end_pos)
+
+    # Group animations
+    from PyQt5.QtCore import QParallelAnimationGroup
+    animation_group = QParallelAnimationGroup()
+    animation_group.addAnimation(current_animation)
+    animation_group.addAnimation(next_animation)
+
+    # Keep a reference to the animation group to prevent garbage collection
+    if not hasattr(stacked_widget, '_animations'):
+        stacked_widget._animations = []
+    stacked_widget._animations.append(animation_group)
+
+    # Start animations
+    animation_group.start()
+
+    # After animation finishes, clean up
+    def on_animation_finished():
+        # Avoid hiding the widget to prevent focus issues
+        current_widget.setGeometry(QRect(0, 0, width, height))
+        next_widget.setGeometry(QRect(0, 0, width, height))
+        stacked_widget.setCurrentIndex(next_index)
+        # Set focus to the next widget to ensure proper focus handling
+        next_widget.setFocus()
+        # Remove the animation from the list to allow garbage collection
+        stacked_widget._animations.remove(animation_group)
+
+    animation_group.finished.connect(on_animation_finished)
+
+def switch_tab(stacked_widget, direction):
+    current_index = stacked_widget.currentIndex()
+    total_tabs = stacked_widget.count()
+    new_index = (current_index + direction) % total_tabs
+    wipe_transition(stacked_widget, current_index, new_index, direction)
+
+def switch_to_tab(stacked_widget, index):
+    current_index = stacked_widget.currentIndex()
+    direction = 1 if index > current_index else -1
+    if 0 <= index < stacked_widget.count() and index != current_index:
+        wipe_transition(stacked_widget, current_index, index, direction)
+
+def refresh_tab(stacked_widget):
+    current_widget = stacked_widget.currentWidget()
+    if isinstance(current_widget, QWebEngineView):
+        auto_switcher = getattr(stacked_widget, 'auto_switcher', None)
+        if auto_switcher:
+            auto_switcher.save_ui_state(current_widget)
+            current_widget.reload()
+            current_widget.loadFinished.connect(lambda: auto_switcher.restore_ui_state(current_widget))
+        else:
+            current_widget.reload()
+
+def refresh_all_tabs(stacked_widget):
+    auto_switcher = getattr(stacked_widget, 'auto_switcher', None)
+    for i in range(stacked_widget.count()):
+        widget = stacked_widget.widget(i)
+        if isinstance(widget, QWebEngineView):
+            if auto_switcher:
+                auto_switcher.save_ui_state(widget)
+                widget.reload()
+                widget.loadFinished.connect(lambda w=widget: auto_switcher.restore_ui_state(w))
+            else:
+                widget.reload()
+
+if __name__ == "__main__":
+    base_ip = '10.0.0.186:8080'  # Updated IP address
+    urls = [
+        f'http://{base_ip}/browse/XCH-1?filter=-5',
+        f'http://{base_ip}/browse/XCH-5?filter=-5',
+        'https://www.github.com'
+    ]
+    # Set the interval in milliseconds (e.g., 5000 ms for 5 seconds)
+    interval = 5000  # Adjust as needed
+    open_fullscreen_browser_with_features(urls, interval=interval)

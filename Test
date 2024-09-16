@@ -1,0 +1,26 @@
+import sys
+from PyQt5.QtWidgets import QApplication, QWidget
+from PyQt5.QtCore import Qt
+
+class MeasureWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.resize(800, 600)  # Initial size
+        self.setWindowTitle("Click to measure window size")
+        self.show()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:  # Left click to trigger size measurement
+            self.measure_window_size()
+
+    def measure_window_size(self):
+        width = self.frameGeometry().width()
+        height = self.frameGeometry().height()
+        print(f"Window size: Width = {width}, Height = {height}")
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    
+    window = MeasureWindow()
+    
+    sys.exit(app.exec_())
