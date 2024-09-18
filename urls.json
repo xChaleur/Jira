@@ -1,11 +1,10 @@
 {
     "urls": [
-        "http://10.0.0.186:8080/browse/XCH-1?filter=-5",
-        "http://10.0.0.186:8080/browse/XCH-5?filter=-5",
+        "https://code.visualstudio.com/download",
+        "https://www.youtube.com/",
         "https://www.github.com",
         "https://www.google.com/",
-        "https://grabcad.com/library/atlas-graphics-card-support-1",
-        "https://openai.com/index/dall-e-3/"
+        "https://grabcad.com/library/atlas-graphics-card-support-1"
     ],
     "interval": 5000,
     "pause_duration": 20000,
@@ -20,6 +19,8 @@
         "2": "Ctrl+3",
         "3": "Ctrl+4",
         "4": "Ctrl+5",
-        "5": "Ctrl+6"
+        "5": "Ctrl+6",
+        "6": "Ctrl+7",
+        "7": "Ctrl+8"
     }
 }

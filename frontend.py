@@ -1,290 +1,331 @@
+# admin.py
+
 import sys
 import os
 import json
+import subprocess
 from PyQt5.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QStackedWidget, QLabel, QShortcut
+    QApplication, QMainWindow, QMenuBar, QMenu, QAction, QTabWidget,
+    QInputDialog, QMessageBox
 )
-from PyQt5.QtGui import QKeySequence
-from PyQt5.QtCore import QUrl, QTimer, Qt, QFileSystemWatcher, QPropertyAnimation, QRect, QParallelAnimationGroup
+from PyQt5.QtCore import QUrl, Qt
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage, QWebEngineProfile
+from PyQt5.QtGui import QShortcut, QKeySequence
 
 
-class AutoTabSwitcher:
-    def __init__(self, stacked_widget, pause_label, config_path):
-        self.stacked_widget = stacked_widget
-        self.pause_label = pause_label
-        self.current_index = 0
-        self.is_paused = False  # Track whether the tab switcher is paused or not
+class AdminPortal(QMainWindow):
+    def __init__(self, config_path):
+        super().__init__()
         self.config_path = config_path
+        self.urls = []
+        self.no_tab_urls = {}  # Stores No Tab URLs with their associated shortcuts
+        self.interval = 5000
+        self.pause_duration = 10000
+        self.tab_pause_duration = 13000
+        self.refresh_command = {'refresh_tab': None, 'refresh_all': False}
+        self.shortcuts = {}
+        self.web_views = []
+
         self.load_config()
-        self.total_tabs = len(self.urls)
-
-        # Timer for switching tabs
-        self.switch_timer = QTimer()
-        self.switch_timer.timeout.connect(self.switch_tab)
-
-        # Timer for refreshing tabs
-        self.refresh_timer = QTimer()
-        self.refresh_timer.timeout.connect(self.refresh_next_tab)
-
-        # Timer for auto-resume after tab switching
-        self.tab_pause_timer = QTimer()
-        self.tab_pause_timer.setSingleShot(True)
-        self.tab_pause_timer.timeout.connect(self.resume_current_tab)  # Auto resume after tab pause duration
-
-        # Timer for auto-resume after manual pause
-        self.auto_resume_timer = QTimer()
-        self.auto_resume_timer.setSingleShot(True)
-        self.auto_resume_timer.timeout.connect(self.resume_current_tab)  # Auto resume after manual pause duration
-
-        # File watcher to detect changes in `urls.json`
-        self.file_watcher = QFileSystemWatcher([self.config_path])
-        self.file_watcher.fileChanged.connect(self.load_config)  # Reload the config when the file changes
-
-        if self.interval > 0:
-            self.start_timer()
-        else:
-            self.is_paused = True
-            self.pause_label.show()
-
-        # Bind shortcuts for existing tabs
-        self.bind_shortcuts()
+        self.init_ui()
 
     def load_config(self):
         try:
             with open(self.config_path, 'r') as f:
                 config = json.load(f)
-            self.urls = config['urls']
-            self.interval = config.get('interval', 5000)
-            self.pause_duration = config.get('pause_duration', 10000)
-            self.tab_pause_duration = config.get('tab_pause_duration', 30000)  # Default 30 seconds
-            self.refresh_command = config.get('refresh_command', {'refresh_tab': None, 'refresh_all': False})
-            self.shortcuts = config.get('shortcuts', {})  # Load shortcuts from config
-
-            # Update tabs based on the new URLs
-            self.update_tabs()
-
-            # Handle refresh commands
-            self.handle_refresh_command()
-
         except FileNotFoundError:
-            print(f"Configuration file '{self.config_path}' not found.")
-            sys.exit(1)
+            QMessageBox.critical(self, "Error", f"Configuration file '{self.config_path}' not found.")
+            return
         except json.JSONDecodeError as e:
-            print(f"Error decoding JSON from '{self.config_path}': {e}")
-            sys.exit(1)
+            QMessageBox.critical(self, "Error", f"Error decoding JSON from '{self.config_path}': {e}")
+            return
 
-    def update_tabs(self):
-        current_tab_count = self.stacked_widget.count()
+        # Validate configuration
+        self.urls = config.get('urls', [])
+        self.no_tab_urls = config.get('no_tab_urls', {})  # Load No Tab URLs
 
-        # Add new tabs if more URLs are in the config
-        for i in range(current_tab_count, len(self.urls)):
-            web_view = QWebEngineView()
-            web_view.setFocusPolicy(Qt.StrongFocus)
-            profile = self.stacked_widget.widget(0).page().profile()
-            page = QWebEnginePage(profile, web_view)
-            web_view.setPage(page)
-            web_view.setUrl(QUrl(self.urls[i]))
-            self.stacked_widget.addWidget(web_view)
+        if not isinstance(self.urls, list) or not all(isinstance(url, str) for url in self.urls):
+            QMessageBox.critical(self, "Error", "Invalid 'urls' in configuration.")
+            return
 
-        # Remove extra tabs if necessary
-        while self.stacked_widget.count() > len(self.urls):
-            widget = self.stacked_widget.widget(self.stacked_widget.count() - 1)
-            self.stacked_widget.removeWidget(widget)
-            widget.deleteLater()
+        self.interval = config.get('interval', 5000)
+        self.pause_duration = config.get('pause_duration', 10000)
+        self.tab_pause_duration = config.get('tab_pause_duration', 13000)
+        self.refresh_command = config.get('refresh_command', {'refresh_tab': None, 'refresh_all': False})
+        self.shortcuts = config.get('shortcuts', {})
 
-        self.total_tabs = len(self.urls)
+    def save_config(self):
+        try:
+            with open(self.config_path, 'w') as f:
+                json.dump({
+                    'urls': self.urls,
+                    'no_tab_urls': self.no_tab_urls,  # Save No Tab URLs
+                    'interval': self.interval,
+                    'pause_duration': self.pause_duration,
+                    'tab_pause_duration': self.tab_pause_duration,
+                    'refresh_command': self.refresh_command,
+                    'shortcuts': self.shortcuts
+                }, f, indent=4)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Error saving configuration: {e}")
 
-    def handle_refresh_command(self):
-        # Check if a specific tab needs to be refreshed
-        if self.refresh_command['refresh_tab'] is not None:
-            tab_index = self.refresh_command['refresh_tab']
-            if 0 <= tab_index < self.stacked_widget.count():
-                widget = self.stacked_widget.widget(tab_index)
-                if isinstance(widget, QWebEngineView):
-                    widget.reload()
+    def init_ui(self):
+        self.setWindowTitle("Admin Portal")
+        self.showFullScreen()
 
-        # Check if all tabs need to be refreshed
-        if self.refresh_command['refresh_all']:
-            for i in range(self.stacked_widget.count()):
-                widget = self.stacked_widget.widget(i)
-                if isinstance(widget, QWebEngineView):
-                    widget.reload()
+        # Create the menu bar
+        menu_bar = self.menuBar()
+        
+        # Apply styles to make the buttons larger
+        self.setStyleSheet("""
+            QMenuBar {
+                font-size: 18px; /* Menu bar font size */
+            }
+            QMenu {
+                font-size: 16px; /* Menu item font size */
+                padding: 8px; /* Add padding to menu items */
+            }
+            QAction {
+                font-size: 16px; /* Button font size */
+            }
+        """)
 
-        # Reset the refresh command after execution
-        self.refresh_command['refresh_tab'] = None
+        # Tools menu
+        tools_menu = menu_bar.addMenu("Tools")
+
+        # Edit URL action
+        edit_url_action = QAction("Edit URL", self)
+        edit_url_action.setShortcut("Ctrl+E")
+        edit_url_action.triggered.connect(self.edit_current_url)
+        tools_menu.addAction(edit_url_action)
+
+        # Add tab action
+        add_tab_action = QAction("Add Tab", self)
+        add_tab_action.setShortcut("Ctrl+A")
+        add_tab_action.triggered.connect(self.add_tab)
+        tools_menu.addAction(add_tab_action)
+
+        # Delete tab action
+        delete_tab_action = QAction("Delete Tab", self)
+        delete_tab_action.setShortcut("Ctrl+D")
+        delete_tab_action.triggered.connect(self.delete_current_tab)
+        tools_menu.addAction(delete_tab_action)
+
+        # Add No Tab URL action
+        add_no_tab_url_action = QAction("Add No Tab URL", self)
+        add_no_tab_url_action.setShortcut("Ctrl+N")
+        add_no_tab_url_action.triggered.connect(self.add_no_tab_url)
+        tools_menu.addAction(add_no_tab_url_action)
+
+        # Refresh menu
+        refresh_menu = menu_bar.addMenu("Refresh")
+
+        # Refresh Tab action
+        refresh_tab_action = QAction("Refresh Tab", self)
+        refresh_tab_action.setShortcut("Ctrl+R")
+        refresh_tab_action.triggered.connect(self.refresh_current_tab)
+        refresh_menu.addAction(refresh_tab_action)
+
+        # Refresh All action
+        refresh_all_action = QAction("Refresh All", self)
+        refresh_all_action.setShortcut("Ctrl+Shift+R")
+        refresh_all_action.triggered.connect(self.refresh_all_tabs)
+        refresh_menu.addAction(refresh_all_action)
+
+        # Time menu
+        time_menu = menu_bar.addMenu("Time")
+
+        # Edit manual pause duration
+        edit_pause_duration_action = QAction("Edit Manual Pause Duration", self)
+        edit_pause_duration_action.setShortcut("Ctrl+P")
+        edit_pause_duration_action.triggered.connect(self.edit_pause_duration)
+        time_menu.addAction(edit_pause_duration_action)
+
+        # Edit tab pause duration
+        edit_tab_pause_duration_action = QAction("Edit Tab Pause Duration", self)
+        edit_tab_pause_duration_action.setShortcut("Ctrl+T")
+        edit_tab_pause_duration_action.triggered.connect(self.edit_tab_pause_duration)
+        time_menu.addAction(edit_tab_pause_duration_action)
+
+        # Options menu
+        options_menu = menu_bar.addMenu("Options")
+
+        # Exit action
+        exit_action = QAction("Exit", self)
+        exit_action.setShortcut("Ctrl+Q")
+        exit_action.triggered.connect(self.close)
+        options_menu.addAction(exit_action)
+
+        # Exit and open Frontend action
+        exit_and_open_frontend_action = QAction("Exit and Open Frontend", self)
+        exit_and_open_frontend_action.setShortcut("Ctrl+Shift+Q")
+        exit_and_open_frontend_action.triggered.connect(self.exit_and_open_frontend)
+        options_menu.addAction(exit_and_open_frontend_action)
+
+        # Tab widget
+        self.tab_widget = QTabWidget()
+        self.tab_widget.currentChanged.connect(self.on_tab_changed)
+
+        # Set the central widget
+        self.setCentralWidget(self.tab_widget)
+
+        # Load tabs
+        self.load_tabs()
+
+        # Bind No Tab URLs to shortcuts
+        self.bind_no_tab_urls()
+
+    def create_shared_profile(self):
+        storage_path = os.path.join(os.path.expanduser('~'), '.my_browser_profile')
+        if not os.path.exists(storage_path):
+            os.makedirs(storage_path)
+        profile = QWebEngineProfile.defaultProfile()
+        profile.setCachePath(storage_path)
+        profile.setPersistentStoragePath(storage_path)
+        profile.setPersistentCookiesPolicy(QWebEngineProfile.ForcePersistentCookies)
+        return profile
+
+    def load_tabs(self):
+        self.tab_widget.clear()
+        self.web_views.clear()
+        for index, url in enumerate(self.urls):
+            web = QWebEngineView()
+            web.setFocusPolicy(Qt.StrongFocus)
+            page = QWebEnginePage(self.create_shared_profile(), web)
+            web.setPage(page)
+            web.setUrl(QUrl(url))
+            self.tab_widget.addTab(web, f"Tab {index + 1}")
+            self.web_views.append(web)
+
+    def edit_current_url(self):
+        index = self.tab_widget.currentIndex()
+        if index < 0:
+            return
+        current_url = self.urls[index]
+        new_url, ok = QInputDialog.getText(self, "Edit URL", "Enter new URL:", text=current_url)
+        if ok and new_url:
+            self.urls[index] = new_url
+            self.web_views[index].setUrl(QUrl(new_url))
+            self.tab_widget.setTabText(index, f"Tab {index + 1}")
+            self.save_config()
+
+    def add_tab(self):
+        new_url, ok = QInputDialog.getText(self, "Add New Tab", "Enter the URL for the new tab:")
+        if ok and new_url:
+            self.urls.append(new_url)
+            web = QWebEngineView()
+            web.setFocusPolicy(Qt.StrongFocus)
+            page = QWebEnginePage(self.create_shared_profile(), web)
+            web.setPage(page)
+            web.setUrl(QUrl(new_url))
+            new_tab_index = len(self.urls) - 1
+            self.tab_widget.addTab(web, f"Tab {new_tab_index + 1}")
+            self.web_views.append(web)
+            shortcut_key = f"Ctrl+{new_tab_index + 1}"
+            self.shortcuts[str(new_tab_index)] = shortcut_key
+            self.save_config()
+
+    def delete_current_tab(self):
+        index = self.tab_widget.currentIndex()
+        if index < 0:
+            return
+        confirm = QMessageBox.question(
+            self, "Delete Tab",
+            f"Are you sure you want to delete Tab {index + 1}?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if confirm == QMessageBox.Yes:
+            del self.urls[index]
+            self.save_config()
+            self.load_tabs()
+
+    def refresh_current_tab(self):
+        index = self.tab_widget.currentIndex()
+        if index < 0:
+            return
+        self.web_views[index].reload()
+        self.refresh_command['refresh_tab'] = index
         self.refresh_command['refresh_all'] = False
         self.save_config()
 
-    def save_config(self):
-        # Update the refresh commands in the config file
-        with open(self.config_path, 'r+') as f:
-            config = json.load(f)
-            config['refresh_command'] = self.refresh_command
-            f.seek(0)
-            json.dump(config, f, indent=4)
-            f.truncate()
+    def refresh_all_tabs(self):
+        for web_view in self.web_views:
+            web_view.reload()
+        self.refresh_command['refresh_tab'] = None
+        self.refresh_command['refresh_all'] = True
+        self.save_config()
 
-    def start_timer(self):
-        self.is_paused = False
-        self.pause_label.hide()
-        self.switch_timer.start(self.interval)
-        self.schedule_refresh()
+    def add_no_tab_url(self):
+        """Add a No Tab URL with a custom keyboard shortcut."""
+        url, ok = QInputDialog.getText(self, "Add No Tab URL", "Enter the URL:")
+        if ok and url:
+            shortcut, ok = QInputDialog.getText(self, "Add Shortcut", "Enter the custom shortcut (e.g., Ctrl+1):")
+            if ok and shortcut:
+                self.no_tab_urls[shortcut] = url
+                self.save_config()
+                self.bind_no_tab_urls()  # Bind the new shortcut to open the URL
 
-    def stop_timer(self):
-        self.is_paused = True
-        self.switch_timer.stop()
-        self.refresh_timer.stop()
+    def bind_no_tab_urls(self):
+        """Bind each No Tab URL to its corresponding keyboard shortcut."""
+        for shortcut, url in self.no_tab_urls.items():
+            q_shortcut = QShortcut(QKeySequence(shortcut), self)
+            q_shortcut.activated.connect(lambda u=url: self.open_no_tab_url(u))
 
-    def toggle_pause(self):
-        if self.is_paused:
-            self.auto_resume_timer.stop()  # Stop auto-resume if manually resumed
-            self.resume_current_tab()  # Resume manually if paused
+    def open_no_tab_url(self, url):
+        """Open the No Tab URL in the current tab."""
+        current_index = self.tab_widget.currentIndex()
+        if current_index >= 0:
+            current_view = self.tab_widget.widget(current_index)
+            if isinstance(current_view, QWebEngineView):
+                current_view.setUrl(QUrl(url))
+
+    def edit_pause_duration(self):
+        current_pause_duration = self.pause_duration
+        new_pause_duration, ok = QInputDialog.getInt(
+            self, "Edit Manual Pause Duration",
+            "Enter pause duration in milliseconds:",
+            value=current_pause_duration, min=1000
+        )
+        if ok:
+            self.pause_duration = new_pause_duration
+            self.save_config()
+
+    def edit_tab_pause_duration(self):
+        current_tab_pause_duration = self.tab_pause_duration
+        new_tab_pause_duration, ok = QInputDialog.getInt(
+            self, "Edit Tab Pause Duration",
+            "Enter tab switch pause duration in milliseconds:",
+            value=current_tab_pause_duration, min=1000
+        )
+        if ok:
+            self.tab_pause_duration = new_tab_pause_duration
+            self.save_config()
+
+    def on_tab_changed(self, index):
+        pass
+
+    def closeEvent(self, event):
+        # Properly delete web views
+        for web_view in self.web_views:
+            web_view.page().deleteLater()
+            web_view.deleteLater()
+        event.accept()
+
+    def exit_and_open_frontend(self):
+        """Closes the admin portal and opens the frontend.py script."""
+        # Close the current admin portal
+        self.close()
+        # Open the frontend script
+        frontend_path = os.path.join(os.path.dirname(__file__), 'frontend.py')
+        if os.path.exists(frontend_path):
+            subprocess.Popen([sys.executable, frontend_path])
         else:
-            self.pause_current_tab()  # Pause if running
-
-    def schedule_refresh(self):
-        refresh_interval = max(0, self.interval - 3000)
-        self.refresh_timer.start(refresh_interval)
-
-    def refresh_next_tab(self):
-        next_index = (self.current_index + 1) % self.total_tabs
-        widget = self.stacked_widget.widget(next_index)
-        if isinstance(widget, QWebEngineView):
-            widget.reload()
-        self.refresh_timer.stop()
-
-    def switch_tab(self):
-        next_index = (self.current_index + 1) % self.total_tabs
-        self.perform_transition(self.current_index, next_index)
-        self.current_index = next_index
-        self.schedule_refresh()
-
-    def perform_transition(self, current_index, next_index):
-        current_widget = self.stacked_widget.widget(current_index)
-        next_widget = self.stacked_widget.widget(next_index)
-
-        width = self.stacked_widget.frameGeometry().width()
-        height = self.stacked_widget.frameGeometry().height()
-
-        start_pos = QRect(width, 0, width, height)
-        end_pos = QRect(0, 0, width, height)
-
-        next_widget.setGeometry(start_pos)
-        next_widget.show()
-
-        current_animation = QPropertyAnimation(current_widget, b'geometry')
-        current_animation.setDuration(1000)
-        current_animation.setStartValue(QRect(0, 0, width, height))
-        current_animation.setEndValue(QRect(-width, 0, width, height))
-
-        next_animation = QPropertyAnimation(next_widget, b'geometry')
-        next_animation.setDuration(1000)
-        next_animation.setStartValue(start_pos)
-        next_animation.setEndValue(end_pos)
-
-        animation_group = QParallelAnimationGroup()
-        animation_group.addAnimation(current_animation)
-        animation_group.addAnimation(next_animation)
-
-        if not hasattr(self, '_animations'):
-            self._animations = []
-        self._animations.append(animation_group)
-
-        animation_group.start()
-
-        def on_animation_finished():
-            current_widget.setGeometry(0, 0, width, height)
-            next_widget.setGeometry(0, 0, width, height)
-            self.stacked_widget.setCurrentIndex(next_index)
-            self._animations.remove(animation_group)
-
-        animation_group.finished.connect(on_animation_finished)
-
-    def pause_current_tab(self):
-        self.stop_timer()
-        self.pause_label.setText(f"Screen is paused. Press Ctrl+P to resume, or auto-resume in {self.tab_pause_duration / 1000:.1f} seconds.")
-        self.pause_label.show()
-        self.auto_resume_timer.start(self.tab_pause_duration)  # Use tab_pause_duration for each tab switch
-
-    def resume_current_tab(self):
-        self.start_timer()
-        self.pause_label.hide()
-
-    def bind_shortcut_for_tab(self, tab_index, shortcut_sequence):
-        # Bind a custom shortcut for the given tab index from the config
-        shortcut = QShortcut(QKeySequence(shortcut_sequence), self.stacked_widget)
-        shortcut.activated.connect(lambda idx=tab_index: self.switch_to_tab(idx))
-
-    def switch_to_tab(self, index):
-        self.perform_transition(self.current_index, index)
-        self.current_index = index
-        self.pause_current_tab()  # Pause for the tab switch duration
-
-    def bind_shortcuts(self):
-        # Bind shortcuts for existing tabs based on the `shortcuts` field in `urls.json`
-        for index, shortcut in self.shortcuts.items():
-            if 0 <= int(index) < self.total_tabs:
-                self.bind_shortcut_for_tab(int(index), shortcut)
-
-
-def open_fullscreen_browser_with_features(config_path):
-    app = QApplication(sys.argv)
-
-    profile = QWebEngineProfile('SharedProfile', app)
-    profile.setPersistentCookiesPolicy(QWebEngineProfile.ForcePersistentCookies)
-    storage_path = os.path.join(os.path.expanduser('~'), '.my_browser_profile')
-    if not os.path.exists(storage_path):
-        os.makedirs(storage_path)
-    profile.setCachePath(storage_path)
-    profile.setPersistentStoragePath(storage_path)
-
-    try:
-        with open(config_path, 'r') as f:
-            config = json.load(f)
-        urls = config['urls']
-    except FileNotFoundError:
-        print(f"Configuration file '{config_path}' not found.")
-        sys.exit(1)
-    except json.JSONDecodeError as e:
-        print(f"Error decoding JSON from '{config_path}': {e}")
-        sys.exit(1)
-
-    main_widget = QWidget()
-    main_widget.setWindowFlags(Qt.FramelessWindowHint)
-    main_layout = QVBoxLayout()
-    main_layout.setContentsMargins(0, 0, 0, 0)
-    main_widget.setLayout(main_layout)
-
-    stacked_widget = QStackedWidget()
-    for url in urls:
-        web = QWebEngineView()
-        web.setFocusPolicy(Qt.StrongFocus)
-        page = QWebEnginePage(profile, web)
-        web.setPage(page)
-        web.setUrl(QUrl(url))
-        stacked_widget.addWidget(web)
-
-    main_layout.addWidget(stacked_widget)
-
-    pause_label = QLabel("Paused")
-    pause_label.setAlignment(Qt.AlignCenter)
-    pause_label.setStyleSheet("font-size: 24px; color: white; background-color: rgba(0, 0, 0, 0.5); padding: 10px;")
-    pause_label.hide()
-    main_layout.addWidget(pause_label)
-
-    auto_switcher = AutoTabSwitcher(stacked_widget, pause_label, config_path)
-    stacked_widget.auto_switcher = auto_switcher
-
-    # Bind Ctrl+P for pause and resume
-    pause_shortcut = QShortcut(QKeySequence("Ctrl+P"), main_widget)
-    pause_shortcut.activated.connect(auto_switcher.toggle_pause)
-
-    main_widget.showFullScreen()
-
-    sys.exit(app.exec_())
+            QMessageBox.critical(self, "Error", f"Frontend script not found at {frontend_path}")
 
 
 if __name__ == "__main__":
+    app = QApplication(sys.argv)
     config_path = os.path.join(os.path.dirname(__file__), 'urls.json')
-    open_fullscreen_browser_with_features(config_path)
+    admin_portal = AdminPortal(config_path)
+    admin_portal.show()
+    sys.exit(app.exec_())

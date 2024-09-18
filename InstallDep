@@ -1,26 +1,25 @@
-#!/bin/bash
+import subprocess
+import sys
 
-# Path to the requirements.txt file
-REQUIREMENTS_FILE="requirements/requirements.txt"
+# List of dependencies
+dependencies = [
+    "PyQt5==5.15.11",
+    "PyQt5-Qt5==5.15.2",
+    "PyQt5_sip==12.15.0",
+    "PyQtWebEngine==5.15.7",
+    "PyQtWebEngine-Qt5==5.15.2"
+]
 
-# Check if Python is installed
-if ! command -v python3 &> /dev/null
-then
-    echo "Python is not installed. Please install Python before proceeding."
-    exit 1
-fi
+def install(package):
+    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
 
-# Check if pip is installed
-if ! command -v pip3 &> /dev/null
-then
-    echo "pip is not installed. Installing pip..."
-    curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py
-    python3 get-pip.py
-    rm get-pip.py
-fi
+# Install each dependency
+for dependency in dependencies:
+    try:
+        print(f"Installing {dependency}...")
+        install(dependency)
+        print(f"{dependency} installed successfully.")
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to install {dependency}: {e}")
 
-# Install dependencies from requirements.txt
-echo "Installing dependencies from requirements.txt..."
-pip3 install -r $REQUIREMENTS_FILE
-
-echo "Dependencies installed successfully!"
+print("All dependencies installed!")
